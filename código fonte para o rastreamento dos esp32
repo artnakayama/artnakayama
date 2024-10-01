@@ -1,0 +1,132 @@
+
+#include <WiFi.h>
+#include <esp_now.h>
+#include <math.h>
+
+// Identificação única para cada dispositivo móvel
+const char* UID = "esp_movel_1"; // Modifique para cada ESP32 móvel
+
+// Endereço MAC do ESP32 fixo
+uint8_t broadcastAddress[] = {0x24, 0x6F, 0x28, 0xXX, 0xXX, 0xXX}; // Substitua pelo MAC do fixo
+
+// Dados dos roteadores (SSID e senhas)
+const char* ssid1 = "Roteador_1";
+const char* password1 = "senha1";
+const char* ssid2 = "Roteador_2";
+const char* password2 = "senha2";
+const char* ssid3 = "Roteador_3";
+const char* password3 = "senha3";
+
+// Coordenadas dos roteadores (pré-definidas)
+float router1_x = 0.0, router1_y = 0.0;
+float router2_x = 10.0, router2_y = 0.0;
+float router3_x = 5.0, router3_y = 10.0;
+
+typedef struct {
+char uid[32];
+float x;
+float y;
+} LocationData;
+
+LocationData locationData;
+
+// Função para calcular a distância baseada no RSSI (modelo de perda de caminho)
+float calculateDistance(int rssi) {
+// Constantes para o cálculo da perda de sinal
+int txPower = -59; // Potência de transmissão em dBm (valor típico)
+float n = 2.0; // Expoente de perda de caminho (ambiente livre = 2.0)
+
+// Fórmula para converter RSSI em distância (em metros)
+return pow(10, (txPower - rssi) / (10 * n));
+}
+
+// Função para conectar ao roteador e obter o RSSI
+int getRSSI(const char* ssid, const char* password) {
+WiFi.begin(ssid, password);
+while (WiFi.status() != WL_CONNECTED) {
+delay(500);
+Serial.print(".");
+}
+int rssi = WiFi.RSSI();
+WiFi.disconnect(true);
+delay(1000);
+return rssi;
+}
+
+// Função para calcular as coordenadas usando trilateração
+void calculateCoordinates() {
+// Obter RSSI dos três roteadores
+int rssi1 = getRSSI(ssid1, password1);
+int rssi2 = getRSSI(ssid2, password2);
+int rssi3 = getRSSI(ssid3, password3);
+
+// Calcular as distâncias
+float d1 = calculateDistance(rssi1);
+float d2 = calculateDistance(rssi2);
+float d3 = calculateDistance(rssi3);
+
+// Trilateração para calcular as coordenadas do ESP32 móvel
+float A = 2 * (router2_x - router1_x);
+float B = 2 * (router2_y - router1_y);
+float C = pow(d1, 2) - pow(d2, 2) - pow(router1_x, 2) + pow(router2_x, 2) - pow(router1_y, 2) + pow(router2_y, 2);
+float D = 2 * (router3_x - router1_x);
+float E = 2 * (router3_y - router1_y);
+float F = pow(d1, 2) - pow(d3, 2) - pow(router1_x, 2) + pow(router3_x, 2) - pow(router1_y, 2) + pow(router3_y, 2);
+
+float x = (C * E - F * B) / (E * A - B * D);
+float y = (C * D - A * F) / (B * D - A * E);
+
+// Atribuir coordenadas ao objeto locationData
+strncpy(locationData.uid, UID, sizeof(locationData.uid));
+locationData.x = x;
+locationData.y = y;
+}
+
+// Função para enviar as coordenadas ao ESP32 fixo
+void sendCoordinates() {
+// Enviar dados ao ESP32 fixo
+esp_now_send(broadcastAddress, (uint8_t *) &locationData, sizeof(locationData));
+}
+
+void onDataSent(const uint8_t *mac_addr, esp_now_send_status_t status) {
+Serial.print("Last Packet Send Status: ");
+Serial.println(status == ESP_NOW_SEND_SUCCESS ? "Delivery Success" : "Delivery Fail");
+}
+
+void setup() {
+Serial.begin(115200);
+
+// Inicializando o WiFi no modo STA
+WiFi.mode(WIFI_STA);
+WiFi.disconnect();
+delay(100);
+
+// Inicializando ESP-NOW
+if (esp_now_init() != ESP_OK) {
+Serial.println("Erro ao inicializar ESP-NOW");
+return;
+}
+
+// Registrando o callback de envio de dados
+esp_now_register_send_cb(onDataSent);
+
+// Registrar o ESP32 fixo como um peer
+esp_now_peer_info_t peerInfo;
+memcpy(peerInfo.peer_addr, broadcastAddress, 6);
+peerInfo.channel = 0;
+peerInfo.encrypt = false;
+
+if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+Serial.println("Falha ao adicionar peer");
+return;
+}
+}
+
+void loop() {
+calculateCoordinates(); // Calcular coordenadas
+sendCoordinates(); // Enviar coordenadas ao ESP32 fixo
+
+delay(5000); // Aguarda 5 segundos antes de recalcular e enviar novamente
+}
+
+
