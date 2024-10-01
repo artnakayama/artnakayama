@@ -1,0 +1,131 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include <FirebaseESP32.h>
+
+// Configurações do WiFi e Firebase
+#define WIFI_SSID "seu_ssid"
+#define WIFI_PASSWORD "sua_senha"
+#define FIREBASE_HOST "seu_projeto.firebaseio.com"
+#define FIREBASE_AUTH "sua_chave_do_firebase"
+
+// Inicializando Firebase
+FirebaseData firebaseData;
+FirebaseJson json;
+
+// Endereço MAC dos ESP32 móveis (adicione os dois)
+uint8_t mobileAddress1[] = {0x24, 0x6F, 0x28, 0xXX, 0xXX, 0xXX};
+uint8_t mobileAddress2[] = {0x24, 0x6F, 0x28, 0xYY, 0xYY, 0xYY};
+
+// Estrutura para receber coordenadas
+typedef struct {
+  char uid[32];
+  float x;
+  float y;
+} LocationData;
+
+LocationData receivedData;
+
+// Variáveis para armazenar os dados recebidos
+float x1, y1, x2, y2;
+String uid1, uid2;
+bool received1 = false;
+bool received2 = false;
+
+// Callback para receber coordenadas dos ESPs móveis
+void onDataReceive(const uint8_t *mac, const uint8_t *incomingData, int len) {
+  memcpy(&receivedData, incomingData, sizeof(receivedData));
+  Serial.print("Recebido UID: ");
+  Serial.println(receivedData.uid);
+  Serial.print("Coordenadas: X = ");
+  Serial.print(receivedData.x);
+  Serial.print(", Y = ");
+  Serial.println(receivedData.y);
+
+  // Armazenar os dados recebidos
+  if (String(receivedData.uid) == "esp_movel_1") {
+    x1 = receivedData.x;
+    y1 = receivedData.y;
+    uid1 = String(receivedData.uid);
+    received1 = true;
+  } else if (String(receivedData.uid) == "esp_movel_2") {
+    x2 = receivedData.x;
+    y2 = receivedData.y;
+    uid2 = String(receivedData.uid);
+    received2 = true;
+  }
+
+  // Se ambos enviaram, calcular o mais próximo e atualizar o Firebase
+  if (received1 && received2) {
+    float dist1 = sqrt(pow(x1, 2) + pow(y1, 2));
+    float dist2 = sqrt(pow(x2, 2) + pow(y2, 2));
+
+    String chosenUid = (dist1 < dist2) ? uid1 : uid2;
+
+    // Atualizar Firebase com o UID mais próximo
+    Firebase.setString(firebaseData, "/chosen", chosenUid);
+    if (firebaseData.httpCode() == 200) {
+      Serial.println("Firebase atualizado com sucesso");
+    } else {
+      Serial.println("Erro ao atualizar Firebase");
+    }
+
+    // Resetar variáveis de recebimento
+    received1 = false;
+    received2 = false;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Inicializar WiFi
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("Conectado ao WiFi");
+
+  // Configurar Firebase
+  Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
+  Firebase.reconnectWiFi(true);
+
+  // Inicializando ESP-NOW
+  WiFi.mode(WIFI_STA);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("Erro ao inicializar ESP-NOW");
+    return;
+  }
+
+  // Registrando o callback de recebimento de dados
+  esp_now_register_recv_cb(onDataReceive);
+
+  // Adicionar os ESPs móveis como peers
+  esp_now_peer_info_t peerInfo;
+  memcpy(peerInfo.peer_addr, mobileAddress1, 6);
+  peerInfo.channel = 0;  
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+
+  memcpy(peerInfo.peer_addr, mobileAddress2, 6);
+  esp_now_add_peer(&peerInfo);
+}
+
+void loop() {
+  // Verificar no Firebase se o campo "status" mudou para "solicitado"
+  if (Firebase.getString(firebaseData, "/status")) {
+    String status = firebaseData.stringData();
+    if (status == "solicitado") {
+      Serial.println("Solicitação recebida, pedindo coordenadas...");
+
+      // Enviar solicitação para os ESPs móveis
+      uint8_t requestMessage = 1; // Mensagem simples para solicitar dados
+      esp_now_send(mobileAddress1, &requestMessage, sizeof(requestMessage));
+      esp_now_send(mobileAddress2, &requestMessage, sizeof(requestMessage));
+      
+      // Alterar status no Firebase para "coletando"
+      Firebase.setString(firebaseData, "/status", "coletando");
+    }
+  }
+
+  delay(1000); // Aguarda 1 segundo antes de verificar novamente
